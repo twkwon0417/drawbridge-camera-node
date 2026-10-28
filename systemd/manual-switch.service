@@ -1,0 +1,12 @@
+[Unit]
+Description=Load manual switch driver (manual_switch)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'lsmod | grep -q manual_switch || insmod /home/pi/ku_star/driver/manual_switch.ko'
+ExecStop=/sbin/rmmod manual_switch
+
+[Install]
+WantedBy=multi-user.target

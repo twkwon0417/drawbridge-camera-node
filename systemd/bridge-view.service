@@ -1,0 +1,15 @@
+[Unit]
+Description=Drawbridge camera detector + web server (bridge_view)
+After=ov5647-skel.service
+Requires=ov5647-skel.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/ku_star/detector
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -e /dev/video0 ] && exit 0; sleep 0.5; done; exit 1'
+ExecStart=/home/pi/ku_star/detector/bridge_view -d /dev/video0 -p BA81 -P 8080
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

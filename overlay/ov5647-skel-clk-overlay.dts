@@ -1,0 +1,68 @@
+/dts-v1/;
+/plugin/;
+
+/{
+	compatible = "brcm,bcm2835";
+
+	fragment@0 {
+		target = <&i2c_vc>;
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+
+			ov5647_skel: ov5647_skel@36 {
+				compatible = "myorg,ov5647-skel";
+				reg = <0x36>;
+				status = "okay";
+
+				clocks = <&clocks 45>;
+				clock-names = "xclk";
+				assigned-clocks = <&clocks 45>;
+				assigned-clock-rates = <25000000>;
+
+				pwdn-gpios = <&expgpio 5 1>;
+
+				port {
+					skel_ep: endpoint {
+						remote-endpoint = <&csi_ep>;
+						clock-lanes = <0>;
+						data-lanes = <1 2>;
+
+						link-frequencies = /bits/ 64 <297000000>;
+					};
+				};
+			};
+		};
+	};
+
+	fragment@1 {
+		target = <&csi1>;
+		__overlay__ {
+			status = "okay";
+			port {
+				csi_ep: endpoint {
+					remote-endpoint = <&skel_ep>;
+
+					clock-lanes = <0>;
+					data-lanes = <1 2>;
+				};
+			};
+		};
+	};
+
+	fragment@2 {
+		target = <&i2c0_pins>;
+		__overlay__ {
+			brcm,pins = <44 45>;
+			brcm,function = <5>;
+		};
+	};
+
+	fragment@3 {
+		target = <&i2c_vc>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+};

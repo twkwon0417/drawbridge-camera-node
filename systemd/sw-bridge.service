@@ -1,0 +1,13 @@
+[Unit]
+Description=Manual switch MQTT bridge (sw_bridge)
+After=manual-switch.service
+Requires=manual-switch.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=3
+ExecStart=/home/pi/ku_star/detector/sw_bridge
+
+[Install]
+WantedBy=multi-user.target

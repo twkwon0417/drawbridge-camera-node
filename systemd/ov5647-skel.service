@@ -1,0 +1,12 @@
+[Unit]
+Description=Load custom OV5647 sensor driver (ov5647_skel)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'lsmod | grep -q ov5647_skel || insmod /home/pi/ku_star/driver/ov5647_skel.ko'
+ExecStop=/sbin/rmmod ov5647_skel
+
+[Install]
+WantedBy=multi-user.target

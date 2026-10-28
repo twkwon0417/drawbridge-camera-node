@@ -1,0 +1,15 @@
+*.o
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.cmd
+.*.cmd
+modules.order
+Module.symvers
+.tmp_versions/
+*.dtbo
+detector/bridge_view
+detector/bridge_detect
+detector/sw_bridge
+.DS_Store
