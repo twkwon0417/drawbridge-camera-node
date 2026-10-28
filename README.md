@@ -1,143 +1,107 @@
-# Drawbridge Camera Sensing Node
+# Drawbridge camera sensing node
 
-Camera sensing node for a three-node Raspberry Pi drawbridge control system, built for the Embedded System Software course at Konkuk University (May – Jul 2026, team of 3).
+My part of a three-node Raspberry Pi drawbridge, built with two teammates for the Embedded System Software course at Konkuk University (May to July 2026). Pi 1 drove the motor, LEDs and buzzer, Pi 2 ran the MQTT broker and the main control logic, and I built Pi 3: the camera and manual-control node in this repository.
 
-This repository contains **my part** of the system: the sensing node (Pi 3). It runs an OV5647 camera through a custom V4L2 sensor driver without the Raspberry Pi camera firmware, detects activity in three zones of the bridge, and publishes the result over MQTT to the main controller.
+Pi 3 runs an OV5647 camera through a custom V4L2 sensor driver without the Raspberry Pi camera firmware, watches three zones of the bridge for activity, and reports to Pi 2 over MQTT.
 
 Demo video: https://www.youtube.com/watch?v=gtMp4sZuRjk
-
-[한국어 설치 가이드 (Korean setup guide)](README.ko.md)
-
-## System overview
-
-| Node | Role | Owner |
-|---|---|---|
-| Pi 1 | Drives the bridge motor, LEDs, and buzzer | Teammate |
-| Pi 2 | MQTT broker and main control logic | Teammate |
-| **Pi 3** | **Camera sensing and manual control input (this repository)** | **Me** |
+Korean setup guide: [README.ko.md](README.ko.md)
 
 ```
 OV5647 ──CSI-2──▶ ov5647_skel (V4L2 subdev) ──▶ /dev/video0
-                                                   │ V4L2 MMAP, raw Bayer 640×480
+                                                   │ raw Bayer 640×480, MMAP
                                                    ▼
-                                    bridge_view: 3-zone change/occupancy detection
-                                                   │ MQTT, QoS 1, every 1 s
+                                    bridge_view: per-zone change detection
+                                                   │ MQTT, QoS 1, every second
                                                    ▼
                                      Pi 2 broker ──▶ main control ──▶ Pi 1 actuators
 ```
 
-Environment: Raspberry Pi 3B, Raspbian Buster, Linux 4.19.97-v7+, OV5647 (MIPI CSI-2, 2 data lanes, I²C address 0x36).
+Hardware and OS: Raspberry Pi 3B, Raspbian Buster, Linux 4.19.97-v7+, OV5647 on 2 CSI-2 data lanes, I²C address 0x36.
 
-## Repository layout
+## What's here
 
-```
-driver/     ov5647_skel.c      OV5647 V4L2 sub-device driver
-            ov5647_hw.h        register tables, stream on/off, sensor init
-            ov5647_ctrls.h     exposure, gain, flip, test-pattern controls
-            manual_switch.c    GPIO interrupt driver for two manual switches
-overlay/    ov5647-skel-clk-overlay.dts   Device Tree overlay (CAM0 clock, PWDN, CSI-2)
-detector/   bridge_view.c      capture + detection + HTTP preview + MQTT (main service)
-            bridge_detect.c    headless version of the detector
-            sw_bridge.c        forwards switch events from /dev/manual_sw to MQTT
-            tiny_jpeg.h        minimal baseline JPEG encoder for the HTTP preview
-            mqtt_pub.h         thin libmosquitto wrapper with log fallback
-systemd/    four units that load the drivers and start the services in order
-```
+- `driver/`: the OV5647 sensor driver (`ov5647_skel.c`, `ov5647_hw.h`, `ov5647_ctrls.h`) and the manual switch driver (`manual_switch.c`)
+- `overlay/`: Device Tree overlay for the camera clock, power-down GPIO and CSI-2 link
+- `detector/`: `bridge_view` (capture, detection, HTTP preview, MQTT), a headless `bridge_detect`, and `sw_bridge`, which forwards switch events to MQTT
+- `systemd/`: units that load the drivers and start the programs in order at boot
 
 ## Camera driver
 
-`ov5647_skel` is a port of the Raspberry Pi `rpi-4.19.y` OV5647 driver (`drivers/media/i2c/ov5647.c`, GPL-2.0). The register initialization table and the stream on/off sequences come from that driver unchanged. What I changed is what it takes to run the sensor on this board **without the camera firmware** (`start_x=0`):
+I started from the OV5647 driver in the Raspberry Pi `rpi-4.19.y` kernel (`drivers/media/i2c/ov5647.c`, GPL-2.0). Its register init table and stream on/off sequences are used as they are. My changes are what it took to run the sensor on a Pi 3B with `start_x=0`, where the firmware no longer sets up the camera:
 
-- **Real sensor clock.** The stock overlay declares a `fixed-clock` node and relies on the firmware to drive the sensor clock. My overlay connects the BCM2835 CAM0 clock (`<&clocks 45>`) and assigns it 25 MHz, and the driver requests 25 MHz again at power-on.
-- **Continuous CSI-2 clock.** The stock overlay sets `clock-noncontinuous`, which depends on calibration done by the firmware. My overlay removes it, so the driver keeps the clock lane running.
-- **Power-down GPIO for the Pi 3B.** The PWDN line is mapped to the GPIO expander pin (`<&expgpio 5 1>`, CAM_GPIO0).
-- **Probe order.** The stock driver reads the chip ID with only the PWDN line released, since the firmware clock is already running. Without firmware the sensor does not answer on I²C until its clock is on, so this driver powers the sensor fully (clock, output enable, init) before checking the chip ID (0x5647).
-- **V4L2 controls.** Added exposure, analogue gain, horizontal/vertical flip, and test-pattern controls, which the 4.19 stock driver does not have.
-- **Format handling.** TRY and ACTIVE formats are stored separately, and every path reports the 640×480 SBGGR8 mode the sensor actually outputs.
-- **Error reporting.** I²C failures are logged with the register address and value instead of at debug level, which helped separate wiring faults from driver bugs.
+- The stock overlay only declares a `fixed-clock` node and leaves the real clock to the firmware. My overlay wires the sensor to the BCM2835 CAM0 clock (`<&clocks 45>`) at 25 MHz, and the driver requests 25 MHz again at power-on.
+- I removed `clock-noncontinuous` from the overlay. Non-continuous clocking relies on calibration done by the firmware.
+- Power-down is mapped to the Pi 3B's GPIO expander pin (`<&expgpio 5 1>`).
+- Without firmware the sensor has no clock until the driver turns one on, and it will not answer on I²C before that. The probe therefore powers the sensor up completely before reading the chip ID (0x5647).
+- I added exposure, analogue gain, flip and test-pattern controls. The 4.19 stock driver has none.
+- TRY and ACTIVE formats are stored separately, and every path reports the 640×480 SBGGR8 mode the sensor really outputs.
+- I²C errors are printed with the register address and value. That made wiring faults easy to tell apart from driver bugs.
 
-The driver binds to `compatible = "myorg,ov5647-skel"`, so it loads alongside the in-tree `ovti,ov5647` driver without a conflict.
+The driver binds to `compatible = "myorg,ov5647-skel"` so it can be loaded next to the in-tree driver.
 
-## Debugging the rolling frames
+## The rolling-frame bug
 
-With the custom driver, captured frames came back repeated two or three times across the image and drifting sideways. The stock driver with the firmware produced a clean image.
+With my driver, frames came out repeated two or three times across the image and drifting sideways. The stock driver with firmware gave a clean picture.
 
-1. Tuning PLL (0x3037), VTS, and MIPI line-sync registers did not fix it, and some changes produced a black frame, so I reverted them.
-2. I used the stock driver as a known-good baseline. Register readback showed both drivers wrote the same sensor registers, which ruled out the register tables.
-3. I then checked the remaining layers one at a time: I²C, the input clock, and the CSI-2 link.
+Tuning PLL (0x3037), VTS and the MIPI line-sync registers didn't help, and a few of those changes gave a black frame, so I reverted them. I then ran the stock driver as a reference and read back the sensor registers from both. They matched, which ruled out the init tables and left I²C, the input clock and the CSI-2 link to check one by one.
 
-Two causes came out of this:
+There were two causes. With the sensor clock taken from CAM1, the CSI-2 receiver raised CAM1 to about 100 MHz when streaming started, so the sensor ran roughly four times too fast; moving it to CAM0 at 25 MHz fixed that. Non-continuous CSI-2 clocking also needs the firmware's D-PHY calibration, and without it the receiver lost frame sync, so I switched to continuous clocking.
 
-- **Clock.** With the sensor clock taken from CAM1, the CSI-2 receiver raised CAM1 to about 100 MHz when streaming started, so the sensor ran about four times too fast. Moving the sensor to the CAM0 clock at 25 MHz fixed the timing.
-- **CSI-2 clock mode.** Non-continuous clocking needs the D-PHY calibration that the firmware performs. Without the firmware the receiver lost frame sync. Switching to continuous clocking fixed it.
-
-Result: single-frame capture works. Occasional residual drift remains, which I traced to the Buster-era unicam receiver driver and left documented as a known limitation.
+Single-frame capture works after both changes. Some drift still shows up now and then during continuous streaming. I traced it to the Buster-era unicam receiver driver and left it as a known limitation.
 
 ## Detection
 
-`bridge_view` captures raw Bayer frames through V4L2 MMAP (4 buffers) and works on a half-resolution luminance image built from 2×2 Bayer blocks.
+`bridge_view` captures raw Bayer frames over V4L2 MMAP with 4 buffers and averages each 2×2 Bayer block into a half-size grayscale image. The image is split into three vertical zones, one per lane of the bridge. Each zone keeps a moving-average background, and a zone counts as active when enough pixels differ from that background or from the previous frame. After a short warm-up, the node publishes a three-character status every second (`110` means activity in the left and middle zones).
 
-- The image is split into three vertical zones that match the lanes of the bridge.
-- Each zone keeps an exponential moving-average background. A zone is marked active when the share of pixels that differ from the background (occupancy) or from the previous frame (motion) passes a threshold.
-- A short warm-up period lets the background settle after start-up.
-- Every second the node publishes a three-character status, e.g. `110` means activity in the left and middle zones.
+Pixel-change detection was enough here: the controller only needs to know whether each lane is clear, and a Pi 3 has little CPU to spare for object detection. Light reflections caused false detections at first, and moving the camera and changing the lighting fixed that.
 
-I chose pixel-change detection over an object-detection model because the Pi 3 CPU budget is small and the controller only needs to know whether each zone is clear. When light reflections caused false detections, I fixed the camera placement and lighting rather than making the algorithm more complex.
-
-`bridge_view` also serves `/snapshot` and `/stream` over HTTP on port 8080 for live checking, using the bundled JPEG encoder so there is no extra library dependency.
+`bridge_view` also serves `/snapshot` and `/stream` on port 8080 for checking the camera live. The JPEG encoder is a small one bundled in `tiny_jpeg.h`, so there is no extra library to install.
 
 ## Manual switch driver
 
-Manual control was not my assigned role on the team. While preparing the project I built `manual_switch` on my own to learn the interrupt path end to end:
+Manual control wasn't my job on the team. I wrote `manual_switch` on my own while preparing, to learn the interrupt path from GPIO to user space. Both switch lines (BCM 12 for up, BCM 5 for down) raise interrupts, with a 30 ms debounce and a `ready` flag that ignores edges while the module loads or unloads. Events go into a `kfifo`, `read()` blocks on a wait queue, and `poll()` works too. `sw_bridge` watches `/dev/manual_sw` and publishes `MANUAL_UP` or `MANUAL_DOWN`.
 
-- GPIO interrupts on both switch lines (BCM 12 = up, BCM 5 = down)
-- 30 ms debounce in the interrupt handler, plus a `ready` flag that drops spurious edges while the module is loading or unloading
-- events queued in a `kfifo`; `read()` blocks on a wait queue and `poll()` is supported
-- `sw_bridge` polls `/dev/manual_sw` and publishes `MANUAL_UP` / `MANUAL_DOWN`
-
-When the switches did not respond, I wrote a GPIO scan script to tell code bugs from wiring faults. The causes were the default pull resistors, a miswired 4-pin tact switch, and BCM versus physical pin numbering.
+When the switches did nothing, I wrote a GPIO scan script to see whether the problem was code or wiring. It was wiring: the default pull resistors, a 4-pin tact switch connected the wrong way round, and BCM pin numbers mixed up with physical ones.
 
 ## MQTT messages
 
 | Topic | Payload | Meaning |
 |---|---|---|
-| `drawbridge/pi3/event` | `000` – `111` | Activity in the left / middle / right zone, sent every second |
-| `drawbridge/pi3/event` | `MANUAL_UP`, `MANUAL_DOWN` | Manual switch pressed |
+| `drawbridge/pi3/event` | `000` to `111` | activity in the left, middle and right zones, sent every second |
+| `drawbridge/pi3/event` | `MANUAL_UP`, `MANUAL_DOWN` | manual switch pressed |
 
-Messages are sent with QoS 1. If the broker is unreachable, the detector logs the status locally instead.
+Messages use QoS 1. If the broker can't be reached, the detector prints the status locally instead.
 
 ## Build and run
 
-On the Raspberry Pi (kernel headers for 4.19 installed):
+On the Pi, with the 4.19 kernel headers installed:
 
 ```bash
-# Device Tree overlay
 dtc -@ -I dts -O dtb -o /tmp/ov5647-skel-clk.dtbo overlay/ov5647-skel-clk-overlay.dts
 sudo cp /tmp/ov5647-skel-clk.dtbo /boot/overlays/
 
-# /boot/config.txt
+# add to /boot/config.txt:
 #   start_x=0
 #   dtoverlay=ov5647-skel-clk
 #   gpio=5,12=ip,pd
 
-# Kernel modules and user-space programs (libmosquitto-dev needed for MQTT)
 make -C driver
-make -C detector MQTT=1
+make -C detector MQTT=1          # needs libmosquitto-dev
 
-# Start everything at boot
 sudo cp systemd/*.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now ov5647-skel bridge-view manual-switch sw-bridge
 ```
 
-The broker address, topics, zone width, and thresholds are set in `detector/config.h`. The systemd units load the camera driver first, wait for `/dev/video0`, and restart the services if they exit.
+The broker address, topics, zone width and thresholds are in `detector/config.h`.
 
 ## Known limitations
 
-- Occasional residual frame drift remains with the Buster unicam receiver driver.
-- Control values set while the sensor is powered off are stored but not written to the sensor at the next power-on.
+- Occasional drift during continuous streaming with the Buster unicam driver.
+- Control values set while the sensor is powered off are not written to it at the next power-on.
 - Only the 640×480 SBGGR8 mode is supported.
 
 ## License
 
-The camera driver (`driver/ov5647_skel.c`, `driver/ov5647_hw.h`, `driver/ov5647_ctrls.h`) is derived from the Linux OV5647 driver (Copyright (C) 2016, Synopsys, Inc.; author Ramiro Oliveira) and is licensed under GPL-2.0, like the original. Each driver file carries an SPDX license header.
+The camera driver files are derived from the Linux OV5647 driver (Copyright (C) 2016, Synopsys, Inc.; author Ramiro Oliveira) and are GPL-2.0 like the original. Each of them has an SPDX header.
